@@ -14,7 +14,7 @@ const maxN = 1000000
 const maxBufferSize = 1024 * 1024
 
 func main() {
-	s := client.NewClient([]string{"localhost"})
+	s := client.NewClient([]string{"http://localhost:8080"})
 	want, err := send(s)
 	if err != nil {
 		log.Fatalf("Send error: %v", err)
@@ -74,4 +74,5 @@ func receive(s *client.Simple) (sum int64, err error) {
 			sum += int64(i)
 		}
 	}
+	return 0, nil
 }
