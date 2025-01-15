@@ -1,20 +1,75 @@
 package main
 
 import (
-	"bytes"
 	"chukcha/client"
 	"fmt"
+	"go/build"
 	"io"
 	"log"
+	"net"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const maxN = 1000000
-const maxBufferSize = 1024 * 1024
+const (
+	maxN          = 10000000
+	maxBufferSize = 1024 * 1024
+
+	sendFmt = "Send: net %13s, cpu %13s (%.1f MiB)"
+	recvFmt = "Recv: net %13s, cpu %13s"
+)
 
 func main() {
-	s := client.NewClient([]string{"http://localhost:8080"})
+	if err := runTest(); err != nil {
+		log.Fatalf("Test failed: %v", err)
+	}
+	log.Printf("Test passed!")
+}
+func runTest() error {
+	// time info
+	log.SetFlags(log.Flags() | log.Lmicroseconds)
+
+	goPath := os.Getenv("GOPATH")
+	if goPath == "" {
+		goPath = build.Default.GOPATH
+	}
+	log.Printf("Compiling chukcha")
+	out, err := exec.Command("go", "install", "-v", "/root/wk/chukcha").CombinedOutput()
+	if err != nil {
+		log.Printf("Failed to build: %v", err)
+		return fmt.Errorf("compilation failed: %v (out: %s)", err, string(out))
+	}
+	port := 8089
+	dbPath := "/tmp/chukcha"
+	os.RemoveAll(dbPath)
+	os.Mkdir(dbPath, 0777)
+
+	log.Printf("Running chukcha on port %d", port)
+
+	cmd := exec.Command(goPath+"/bin/chukcha", "-dirname="+dbPath, fmt.Sprintf("-port=%d", port))
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	cmd.Start()
+
+	defer cmd.Process.Kill()
+
+	log.Printf("Waiting for the port localhost:%d to open", port)
+	for i := 0; i <= 100; i++ {
+		timeout := time.Millisecond * 50
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("localhost", fmt.Sprint(port)), timeout)
+		if err != nil {
+			time.Sleep(timeout)
+			continue
+		}
+		conn.Close()
+		break
+	}
+	log.Printf("Starting the test")
+	s := client.NewSimple([]string{fmt.Sprintf("http://localhost:%d", port)})
 	want, err := send(s)
 	if err != nil {
 		log.Fatalf("Send error: %v", err)
@@ -27,34 +82,55 @@ func main() {
 	if want != get {
 		log.Fatalf("The expected sum %d is not equal to the actual sum %d", want, get)
 	}
-	fmt.Printf("want is :%d, get is %d\n", want, get)
 	log.Printf("The test pass")
+	return nil
 }
-
 func send(s *client.Simple) (sum int64, err error) {
-	var b bytes.Buffer
+	sendStart := time.Now()
+	var networkTime time.Duration
+	var sentBytes int
+	defer func() {
+		log.Printf(sendFmt, networkTime, time.Since(sendStart)-networkTime, float64(sentBytes/1024/1024))
+	}()
+	buf := make([]byte, 0, maxBufferSize)
 	for i := 0; i <= maxN; i++ {
 		sum += int64(i)
-		fmt.Fprintf(&b, "%d\n", i)
 
-		if b.Len() >= maxBufferSize {
-			if err := s.Send(b.Bytes()); err != nil {
+		buf = strconv.AppendInt(buf, int64(i), 10)
+		buf = append(buf, '\n')
+
+		if len(buf) >= maxBufferSize {
+			start := time.Now()
+			if err := s.Send(buf); err != nil {
 				return 0, err
 			}
-			b.Reset()
+			networkTime += time.Since(start)
+			sentBytes += len(buf)
+			buf = buf[0:0]
 		}
 	}
-	if b.Len() != 0 {
-		if err := s.Send(b.Bytes()); err != nil {
+	if len(buf) != 0 {
+		start := time.Now()
+		if err := s.Send(buf); err != nil {
 			return 0, err
 		}
+		networkTime += time.Since(start)
+		sentBytes += len(buf)
 	}
 	return sum, nil
 }
 
 func receive(s *client.Simple) (sum int64, err error) {
 	buf := make([]byte, maxBufferSize)
-	sum = 0
+
+	var parseTime time.Duration
+	receiveStart := time.Now()
+	defer func() {
+		log.Printf(recvFmt, time.Since(receiveStart)-parseTime, parseTime)
+	}()
+	trimNL := func(r rune) bool {
+		return r == '\n'
+	}
 	for {
 		res, err := s.Receive(buf)
 		if err == io.EOF {
@@ -62,17 +138,15 @@ func receive(s *client.Simple) (sum int64, err error) {
 		} else if err != nil {
 			return 0, err
 		}
-		ints := strings.Split(string(res), "\n")
+		start := time.Now()
+		ints := strings.Split(strings.TrimRightFunc(string(res), trimNL), "\n")
 		for _, str := range ints {
-			if str == "" {
-				continue
-			}
 			i, err := strconv.Atoi(str)
 			if err != nil {
 				return 0, err
 			}
 			sum += int64(i)
 		}
+		parseTime += time.Since(start)
 	}
-	return 0, nil
 }
