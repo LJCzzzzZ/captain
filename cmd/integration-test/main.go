@@ -2,6 +2,7 @@ package main
 
 import (
 	"chukcha/client"
+	"errors"
 	"fmt"
 	"go/build"
 	"io"
@@ -54,7 +55,6 @@ func runTest() error {
 	}
 
 	os.WriteFile("/tmp/chukcha/chunk1", []byte("12345\n"), 0666)
-
 	log.Printf("Running chukcha on port %d", port)
 
 	cmd := exec.Command(goPath+"/bin/chukcha", "-dirname="+dbPath, fmt.Sprintf("-port=%d", port))
@@ -82,14 +82,9 @@ func runTest() error {
 	}
 	log.Printf("Starting the test")
 	s := client.NewSimple([]string{fmt.Sprintf("http://localhost:%d", port)})
-	want, err := send(s)
+	want, get, err := sendAndReceiveConcurrently(s)
 	if err != nil {
-		log.Fatalf("Send error: %v", err)
-	}
-
-	get, err := receive(s)
-	if err != nil {
-		log.Fatalf("Receive error: %v", err)
+		return fmt.Errorf("sendAndReceiveConcurrently: %v", err)
 	}
 	want += 12345
 	if want != get {
@@ -98,6 +93,42 @@ func runTest() error {
 	log.Printf("The test pass")
 	return nil
 }
+
+type sumAndErr struct {
+	sum int64
+	err error
+}
+
+func sendAndReceiveConcurrently(s *client.Simple) (want, get int64, err error) {
+	wantCh := make(chan sumAndErr, 1)
+	getCh := make(chan sumAndErr, 1)
+	sendFinishedCh := make(chan bool, 1)
+	go func() {
+		want, err := send(s)
+		wantCh <- sumAndErr{
+			sum: want,
+			err: err,
+		}
+		sendFinishedCh <- true
+	}()
+	go func() {
+		get, err = receive(s, sendFinishedCh)
+		getCh <- sumAndErr{
+			sum: get,
+			err: err,
+		}
+	}()
+	wantRes := <-wantCh
+	if wantRes.err != nil {
+		return 0, 0, fmt.Errorf("send: %v", err)
+	}
+	getRes := <-getCh
+	if wantRes.err != nil {
+		return 0, 0, fmt.Errorf("receive: %v", err)
+	}
+	return wantRes.sum, getRes.sum, err
+}
+
 func killProcessByPort(port int) error {
 	cmd := exec.Command("lsof", "-t", fmt.Sprintf("-i:%d", port))
 	out, err := cmd.CombinedOutput()
@@ -157,7 +188,7 @@ func send(s *client.Simple) (sum int64, err error) {
 	return sum, nil
 }
 
-func receive(s *client.Simple) (sum int64, err error) {
+func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) {
 	buf := make([]byte, maxBufferSize)
 
 	var parseTime time.Duration
@@ -168,10 +199,22 @@ func receive(s *client.Simple) (sum int64, err error) {
 	trimNL := func(r rune) bool {
 		return r == '\n'
 	}
+	sendFinished := false
 	for {
+		select {
+		case <-sendFinishedCh:
+			sendFinished = true
+		default:
+		}
+
 		res, err := s.Receive(buf)
-		if err == io.EOF {
-			return sum, nil
+		if errors.Is(err, io.EOF) {
+			if sendFinished {
+				log.Printf("Receive: get information that send finished")
+				return sum, nil
+			}
+			time.Sleep(time.Millisecond * 10)
+			continue
 		} else if err != nil {
 			return 0, err
 		}

@@ -59,7 +59,6 @@ func (s *OnDisk) initLastChunkIdx(dirname string) error {
 			s.lastChunkIdx = uint64(chunkIdx) + 1
 		}
 	}
-
 	return nil
 }
 
@@ -125,7 +124,6 @@ func (s *OnDisk) Read(chunk string, off uint64, maxSize uint64, w io.Writer) err
 	if err != nil {
 		return err
 	}
-
 	if _, err := w.Write(truncated); err != nil {
 		return err
 	}

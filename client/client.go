@@ -79,8 +79,15 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 	}
 	if b.Len() == 0 {
 		if !s.curChunk.Complete {
+			if err := s.updateCurrentChunkCompleteStatus(addr); err != nil {
+				return nil, fmt.Errorf("updateCurrentChunkCompleteStatus: %v", err)
+			}
+		}
+
+		if !s.curChunk.Complete {
 			return nil, io.EOF
 		}
+
 		if err := s.ackCurrentChunk(addr); err != nil {
 			return nil, err
 		}
@@ -90,6 +97,20 @@ func (s *Simple) Receive(scratch []byte) ([]byte, error) {
 	}
 	s.off += uint64(b.Len())
 	return b.Bytes(), nil
+}
+
+func (s *Simple) updateCurrentChunkCompleteStatus(addr string) error {
+	chunks, err := s.listChunks(addr)
+	if err != nil {
+		return fmt.Errorf("listChunks failed: %v", err)
+	}
+	for _, c := range chunks {
+		if c.Name == s.curChunk.Name {
+			s.curChunk = c
+			return nil
+		}
+	}
+	return nil
 }
 
 func (s *Simple) updateCurrentChunk(addr string) error {
