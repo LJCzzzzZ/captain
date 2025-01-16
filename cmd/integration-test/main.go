@@ -46,6 +46,14 @@ func runTest() error {
 	dbPath := "/tmp/chukcha"
 	os.RemoveAll(dbPath)
 	os.Mkdir(dbPath, 0777)
+	if isPortInUse(port) {
+		err := killProcessByPort(port)
+		if err != nil {
+			return fmt.Errorf("kill Process by port err: %v", err)
+		}
+	}
+
+	os.WriteFile("/tmp/chukcha/chunk1", []byte("12345\n"), 0666)
 
 	log.Printf("Running chukcha on port %d", port)
 
@@ -53,10 +61,14 @@ func runTest() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	cmd.Start()
+	if err := cmd.Start(); err != nil {
+		log.Printf("Failed to start process: %v", err)
+		return fmt.Errorf("failed to start chukcha: %v", err)
+	}
 
-	defer cmd.Process.Kill()
-
+	defer func() {
+		cmd.Process.Kill()
+	}()
 	log.Printf("Waiting for the port localhost:%d to open", port)
 	for i := 0; i <= 100; i++ {
 		timeout := time.Millisecond * 50
@@ -79,11 +91,36 @@ func runTest() error {
 	if err != nil {
 		log.Fatalf("Receive error: %v", err)
 	}
+	want += 12345
 	if want != get {
 		log.Fatalf("The expected sum %d is not equal to the actual sum %d", want, get)
 	}
 	log.Printf("The test pass")
 	return nil
+}
+func killProcessByPort(port int) error {
+	cmd := exec.Command("lsof", "-t", fmt.Sprintf("-i:%d", port))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("list pid failed :%v", err)
+	}
+	pids := strings.Split(string(out), "\n")
+	for _, pid := range pids {
+		if pid != "" {
+			log.Printf("killing process %s", pid)
+			killCmd := exec.Command("kill", "-9", pid)
+			killCmd.Run()
+		}
+	}
+	return nil
+}
+func isPortInUse(port int) bool {
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 func send(s *client.Simple) (sum int64, err error) {
 	sendStart := time.Now()

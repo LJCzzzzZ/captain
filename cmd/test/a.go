@@ -1,7 +1,13 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"regexp"
+)
 
 func main() {
-	fmt.Println("Hello")
+	var reg = regexp.MustCompile("^chunk([0-9]+)$")
+	s := "chunk1000"
+	res := reg.FindStringSubmatch(s)
+	fmt.Println(res)
 }
