@@ -74,7 +74,13 @@ func (s *Server) ackHandler(ctx *fasthttp.RequestCtx) {
 		ctx.WriteString("bad `chunk` GET param: chunk name must be provided")
 		return
 	}
-	if err := s.s.Ack(string(chunk)); err != nil {
+	size, err := ctx.QueryArgs().GetUint("size")
+	if err != nil {
+		ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		ctx.WriteString(fmt.Sprintf("bad `size` GET param: %v", err))
+		return
+	}
+	if err := s.s.Ack(string(chunk), int64(size)); err != nil {
 		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
 		ctx.WriteString(err.Error())
 	}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"chukcha/protocol"
 	"errors"
 	"fmt"
 	"io"
@@ -25,7 +26,9 @@ type OnDisk struct {
 	lastChunk     string
 	lastChunkSize uint64
 	lastChunkIdx  uint64
-	fps           map[string]*os.File
+
+	fpsMu sync.Mutex
+	fps   map[string]*os.File
 }
 
 // NewOnDisk creates a server that stores all it's data on disk.
@@ -72,7 +75,7 @@ func (s *OnDisk) Write(msgs []byte) error {
 		s.lastChunkIdx += 1
 	}
 
-	fp, err := s.getFileDescriptor(s.lastChunk)
+	fp, err := s.getFileDescriptor(s.lastChunk, false)
 	if err != nil {
 		return err
 	}
@@ -81,17 +84,37 @@ func (s *OnDisk) Write(msgs []byte) error {
 	return err
 }
 
-func (s *OnDisk) getFileDescriptor(chunk string) (*os.File, error) {
+func (s *OnDisk) getFileDescriptor(chunk string, write bool) (*os.File, error) {
+	s.fpsMu.Lock()
+	defer s.fpsMu.Unlock()
+
 	fp, ok := s.fps[chunk]
 	if ok {
 		return fp, nil
 	}
-	fp, err := os.OpenFile(filepath.Join(s.dirname, chunk), os.O_CREATE|os.O_RDWR, 0666)
-	if err != nil {
-		return nil, fmt.Errorf("create  file %q: %s", fp.Name(), err)
+	fl := os.O_RDONLY
+	if write {
+		fl = os.O_CREATE | os.O_RDWR | os.O_EXCL
 	}
+	filename := filepath.Join(s.dirname, chunk)
+	fp, err := os.OpenFile(filename, fl, 0666)
+	if err != nil {
+		return nil, fmt.Errorf("create  file %q: %s", filename, err)
+	}
+
 	s.fps[chunk] = fp
 	return fp, nil
+}
+
+func (s *OnDisk) forgetFileDescriptor(chunk string) {
+	s.fpsMu.Lock()
+	defer s.fpsMu.Unlock()
+	fp, ok := s.fps[chunk]
+	if !ok {
+		return
+	}
+	fp.Close()
+	delete(s.fps, chunk)
 }
 
 // Read copies the data from the in-memory store and writes
@@ -106,7 +129,7 @@ func (s *OnDisk) Read(chunk string, off uint64, maxSize uint64, w io.Writer) err
 		return fmt.Errorf("stat %q: %w", chunk, err)
 	}
 
-	fp, err := s.getFileDescriptor(chunk)
+	fp, err := s.getFileDescriptor(chunk, false)
 	if err != nil {
 		return fmt.Errorf("getFileDescriptor(%q): %v", chunk, err)
 	}
@@ -131,7 +154,7 @@ func (s *OnDisk) Read(chunk string, off uint64, maxSize uint64, w io.Writer) err
 }
 
 // Ack marks the current chunk as done and deletes it's contents.
-func (s *OnDisk) Ack(chunk string) error {
+func (s *OnDisk) Ack(chunk string, size int64) error {
 	s.Lock()
 	defer s.Unlock()
 
@@ -140,10 +163,12 @@ func (s *OnDisk) Ack(chunk string) error {
 	}
 
 	chunkFilename := filepath.Join(s.dirname, chunk)
-
-	_, err := os.Stat(chunkFilename)
+	fi, err := os.Stat(chunkFilename)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", chunk, err)
+	}
+	if fi.Size() > size {
+		return fmt.Errorf("file was not fully processed: the supplied processed size %d is smaller than the chunk file size %d", size, fi.Size())
 	}
 	if err := os.Remove(chunkFilename); err != nil {
 		return fmt.Errorf("removing %q: %v", chunk, err)
@@ -157,16 +182,23 @@ func (s *OnDisk) Ack(chunk string) error {
 	return nil
 }
 
-func (s *OnDisk) ListChunks() ([]Chunk, error) {
-	var res []Chunk
+func (s *OnDisk) ListChunks() ([]protocol.Chunk, error) {
+	var res []protocol.Chunk
 	dis, err := os.ReadDir(s.dirname)
 	if err != nil {
 		return nil, err
 	}
 	for _, di := range dis {
-		c := Chunk{
+		fi, err := di.Info()
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, fmt.Errorf("reading directory: %v", err)
+		}
+		c := protocol.Chunk{
 			Name:     di.Name(),
 			Complete: (di.Name() != s.lastChunk),
+			Size:     uint64(fi.Size()),
 		}
 		res = append(res, c)
 	}
