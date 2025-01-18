@@ -75,7 +75,7 @@ func (s *OnDisk) Write(msgs []byte) error {
 		s.lastChunkIdx += 1
 	}
 
-	fp, err := s.getFileDescriptor(s.lastChunk, false)
+	fp, err := s.getFileDescriptor(s.lastChunk, true)
 	if err != nil {
 		return err
 	}
@@ -129,7 +129,7 @@ func (s *OnDisk) Read(chunk string, off uint64, maxSize uint64, w io.Writer) err
 		return fmt.Errorf("stat %q: %w", chunk, err)
 	}
 
-	fp, err := s.getFileDescriptor(chunk, false)
+	fp, err := s.getFileDescriptor(chunk, true)
 	if err != nil {
 		return fmt.Errorf("getFileDescriptor(%q): %v", chunk, err)
 	}

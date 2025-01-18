@@ -1,11 +1,9 @@
 package main
 
-import (
-	"fmt"
-	"os"
-)
+import "fmt"
 
 func main() {
-	s, _ := os.MkdirTemp(os.TempDir(), "hello")
-	fmt.Println(s)
+	a := []int{1, 2}
+	b := append(a, 1)
+	fmt.Println(b)
 }

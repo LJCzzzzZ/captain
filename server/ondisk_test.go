@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,6 +68,78 @@ func TestGetFileDescriptor(t *testing.T) {
 				t.Errorf("wanted no errors, got error %v", err)
 			}
 		})
+	}
+}
+
+func TestReadWrite(t *testing.T) {
+	srv := testNewOnDisk(t, getTempDir(t))
+	want := "one\ntwo\nthree\nfour\n"
+	if err := srv.Write([]byte(want)); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	chunks, err := srv.ListChunks()
+	if err != nil {
+		t.Fatalf("ListChunks(): %v", err)
+	}
+
+	if got, want := len(chunks), 1; want != got {
+		t.Fatalf("len(ListChunks()) = %d, want %d", got, want)
+	}
+
+	chunk := chunks[0].Name
+
+	var b bytes.Buffer
+	if err := srv.Read(chunk, 0, uint64(len(want)), &b); err != nil {
+		t.Fatalf("Read(%q, 0, %d) = %v, want no errors", chunk, uint64(len(want)), err)
+	}
+
+	got := b.String()
+
+	if got != want {
+		t.Errorf("Read(%q) = %q, want %q", chunk, got, want)
+	}
+
+	want = "one\ntwo\nthree\n"
+	b.Reset()
+	if err := srv.Read(chunk, 0, uint64(len(want)+1), &b); err != nil {
+		t.Fatalf("Read(%q, 0, %d) = %v, want no errors", chunk, uint64(len(want)+1), err)
+	}
+
+	got = b.String()
+	if got != want {
+		t.Errorf("Read(%q) = %q, want %q", chunk, got, want)
+	}
+}
+
+func TestAckOfTheLastChunk(t *testing.T) {
+	srv := testNewOnDisk(t, getTempDir(t))
+
+	want := "one\ntwo\nthree\nfour\n"
+	if err := srv.Write([]byte(want)); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	chunks, err := srv.ListChunks()
+	if err != nil {
+		t.Fatalf("Listchunk(): %v", err)
+	}
+
+	if got, want := len(chunks), 1; got != want {
+		t.Fatalf("len(ListChunks()) = %d, want %d", got, want)
+	}
+	if err := srv.Ack(chunks[0].Name, int64(chunks[0].Size)); err == nil {
+		t.Errorf("Ack(last chunk): got no errors, expected an error")
+	}
+}
+
+func TestAckOfTheCompleteChunk(t *testing.T) {
+	dir := getTempDir(t)
+	srv := testNewOnDisk(t, dir)
+	testCreateFile(t, filepath.Join(dir, "chunk1"))
+
+	if err := srv.Ack("chunk1", 0); err != nil {
+		t.Errorf("Ack(chunk1) = %v, expected no errors", err)
 	}
 }
 func getTempDir(t *testing.T) string {
