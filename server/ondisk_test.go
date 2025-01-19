@@ -128,7 +128,7 @@ func TestAckOfTheLastChunk(t *testing.T) {
 	if got, want := len(chunks), 1; got != want {
 		t.Fatalf("len(ListChunks()) = %d, want %d", got, want)
 	}
-	if err := srv.Ack(chunks[0].Name, int64(chunks[0].Size)); err == nil {
+	if err := srv.Ack(chunks[0].Name, uint64(chunks[0].Size)); err == nil {
 		t.Errorf("Ack(last chunk): got no errors, expected an error")
 	}
 }

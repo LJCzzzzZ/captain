@@ -1,7 +1,7 @@
 package integration
 
 import (
-	"chukcha/client"
+	"captain/client"
 	"errors"
 	"fmt"
 	"io"
@@ -39,27 +39,62 @@ func simpleClientAndServerTest(t *testing.T, concurrent bool) {
 	t.Helper()
 	log.SetFlags(log.Flags() | log.Lmicroseconds)
 
+	etcdPeerPort, err := freeport.GetFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port for etcd peer: %v", err)
+	}
+
+	etcdPort, err := freeport.GetFreePort()
+	if err != nil {
+		t.Fatalf("Failed to get free port for etcd: %v", err)
+	}
+
 	port, err := freeport.GetFreePort()
 	if err != nil {
 		t.Fatalf("Failed to get free port: %v", err)
 	}
 
-	dbPath, err := os.MkdirTemp(os.TempDir(), "chukcha")
+	etcdPath, err := os.MkdirTemp(os.TempDir(), "etcd")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir for etcd: %v", err)
+	}
+	dbPath, err := os.MkdirTemp(os.TempDir(), "captain")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
+	// dbPath := "/tmp/captain1"
 	t.Cleanup(func() {
 		os.RemoveAll(dbPath)
 	})
-	os.Mkdir(dbPath, 0777)
-	os.WriteFile(filepath.Join(dbPath, "chunk1"), []byte("12345\n"), 0666)
+	t.Cleanup(func() {
+		os.RemoveAll(etcdPath)
+	})
+	categoryPath := filepath.Join(dbPath, "numbers")
+	os.MkdirAll(categoryPath, 0777)
 
-	log.Printf("Running chukcha on port %d", port)
+	os.WriteFile(filepath.Join(categoryPath, fmt.Sprintf("chunk%d", 1)), []byte("12345\n"), 0666)
+
+	log.Printf("Running captain on port %d", port)
 
 	errCh := make(chan error, 1)
+
+	etcdArgs := []string{
+		"--data-dir", etcdPath,
+		"--listen-client-urls", fmt.Sprintf("http://localhost:%d", etcdPort),
+		"--advertise-client-urls", fmt.Sprintf("http://localhost:%d", etcdPort),
+		"--listen-peer-urls", fmt.Sprintf("http://localhost:%d", etcdPeerPort),
+	}
+	log.Printf("Runnig `etcd %s`", strings.Join(etcdArgs, " "))
+
+	cmd := exec.Command("etcd", etcdArgs...)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("Could not run etcd: %v", err)
+	}
 	go func() {
-		errCh <- InitAndServe(dbPath, uint(port))
+		errCh <- InitAndServe(fmt.Sprintf("127.0.0.1:%d", etcdPort), dbPath, uint(port))
 	}()
+
+	t.Cleanup(func() { cmd.Process.Kill() })
 
 	log.Printf("Waiting for the port localhost:%d to open", port)
 	for i := 0; i <= 100; i++ {
@@ -131,7 +166,7 @@ func sendAndReceiveConcurrently(s *client.Simple) (want, get int64, err error) {
 		get, err = receive(s, sendFinishedCh)
 		getCh <- sumAndErr{
 			sum: get,
-			err: err,
+			err: nil,
 		}
 	}()
 	wantRes := <-wantCh
@@ -144,31 +179,6 @@ func sendAndReceiveConcurrently(s *client.Simple) (want, get int64, err error) {
 	}
 	return wantRes.sum, getRes.sum, err
 }
-
-func killProcessByPort(port int) error {
-	cmd := exec.Command("lsof", "-t", fmt.Sprintf("-i:%d", port))
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("list pid failed :%v", err)
-	}
-	pids := strings.Split(string(out), "\n")
-	for _, pid := range pids {
-		if pid != "" {
-			log.Printf("killing process %s", pid)
-			killCmd := exec.Command("kill", "-9", pid)
-			killCmd.Run()
-		}
-	}
-	return nil
-}
-func isPortInUse(port int) bool {
-	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
 func send(s *client.Simple) (sum int64, err error) {
 	sendStart := time.Now()
 	var networkTime time.Duration
@@ -177,15 +187,16 @@ func send(s *client.Simple) (sum int64, err error) {
 		log.Printf(sendFmt, networkTime, time.Since(sendStart)-networkTime, float64(sentBytes/1024/1024))
 	}()
 	buf := make([]byte, 0, maxBufferSize)
+	cnt := 0
 	for i := 0; i <= maxN; i++ {
 		sum += int64(i)
-
+		cnt += 1
 		buf = strconv.AppendInt(buf, int64(i), 10)
 		buf = append(buf, '\n')
 
 		if len(buf) >= maxBufferSize {
 			start := time.Now()
-			if err := s.Send(buf); err != nil {
+			if err := s.Send("numbers", buf); err != nil {
 				return 0, err
 			}
 			networkTime += time.Since(start)
@@ -193,16 +204,20 @@ func send(s *client.Simple) (sum int64, err error) {
 			buf = buf[0:0]
 		}
 	}
+	fmt.Println("cnt: ", cnt)
 	if len(buf) != 0 {
 		start := time.Now()
-		if err := s.Send(buf); err != nil {
+		if err := s.Send("numbers", buf); err != nil {
 			return 0, err
 		}
 		networkTime += time.Since(start)
 		sentBytes += len(buf)
 	}
+	fmt.Println("sum: ", sum)
 	return sum, nil
 }
+
+var randomTempErr = errors.New("a random temporary error occurred")
 
 func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) {
 	buf := make([]byte, maxBufferSize)
@@ -216,17 +231,36 @@ func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) 
 		return r == '\n'
 	}
 	sendFinished := false
+
+	loopCnt := 0
 	for {
+		loopCnt += 1
 		select {
 		case <-sendFinishedCh:
+			log.Printf("Receive: got information that send finished")
 			sendFinished = true
 		default:
 		}
-
-		res, err := s.Receive(buf)
-		if errors.Is(err, io.EOF) {
+		err := s.Process("numbers", buf, func(res []byte) error {
+			if loopCnt%10 == 0 {
+				return randomTempErr
+			}
+			start := time.Now()
+			ints := strings.Split(strings.TrimRightFunc(string(res), trimNL), "\n")
+			for _, str := range ints {
+				i, err := strconv.Atoi(str)
+				if err != nil {
+					return err
+				}
+				sum += int64(i)
+			}
+			parseTime += time.Since(start)
+			return nil
+		})
+		if errors.Is(err, randomTempErr) {
+			continue
+		} else if errors.Is(err, io.EOF) {
 			if sendFinished {
-				log.Printf("Receive: get information that send finished")
 				return sum, nil
 			}
 			time.Sleep(time.Millisecond * 10)
@@ -234,15 +268,5 @@ func receive(s *client.Simple, sendFinishedCh chan bool) (sum int64, err error) 
 		} else if err != nil {
 			return 0, err
 		}
-		start := time.Now()
-		ints := strings.Split(strings.TrimRightFunc(string(res), trimNL), "\n")
-		for _, str := range ints {
-			i, err := strconv.Atoi(str)
-			if err != nil {
-				return 0, err
-			}
-			sum += int64(i)
-		}
-		parseTime += time.Since(start)
 	}
 }

@@ -1,4 +1,4 @@
-# chukcha
+# captain
 Easy to use distributed event bus similar to Kafka
 
 # Features (work in progress)

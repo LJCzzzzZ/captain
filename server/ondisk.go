@@ -2,7 +2,7 @@ package server
 
 import (
 	"bytes"
-	"chukcha/protocol"
+	"captain/protocol"
 	"errors"
 	"fmt"
 	"io"
@@ -22,7 +22,7 @@ var filenameRegexp = regexp.MustCompile("^chunk([0-9]+)$")
 type OnDisk struct {
 	dirname string
 
-	sync.RWMutex
+	writeMu       sync.RWMutex
 	lastChunk     string
 	lastChunkSize uint64
 	lastChunkIdx  uint64
@@ -67,8 +67,8 @@ func (s *OnDisk) initLastChunkIdx(dirname string) error {
 
 // Write accepts the messages from the clients and stores them.
 func (s *OnDisk) Write(msgs []byte) error {
-	s.Lock()
-	defer s.Unlock()
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
 	if s.lastChunk == "" || (s.lastChunkSize+uint64(len(msgs)) > maxFileChunkSize) {
 		s.lastChunk = fmt.Sprintf("chunk%d", s.lastChunkIdx)
 		s.lastChunkSize = 0
@@ -121,15 +121,13 @@ func (s *OnDisk) forgetFileDescriptor(chunk string) {
 // the data read to the provided Writer, starting with the
 // offset provided.
 func (s *OnDisk) Read(chunk string, off uint64, maxSize uint64, w io.Writer) error {
-	s.Lock()
-	defer s.Unlock()
 	chunk = filepath.Clean(chunk)
 	_, err := os.Stat(filepath.Join(s.dirname, chunk))
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", chunk, err)
 	}
 
-	fp, err := s.getFileDescriptor(chunk, true)
+	fp, err := s.getFileDescriptor(chunk, false)
 	if err != nil {
 		return fmt.Errorf("getFileDescriptor(%q): %v", chunk, err)
 	}
@@ -153,32 +151,30 @@ func (s *OnDisk) Read(chunk string, off uint64, maxSize uint64, w io.Writer) err
 	return nil
 }
 
-// Ack marks the current chunk as done and deletes it's contents.
-func (s *OnDisk) Ack(chunk string, size int64) error {
-	s.Lock()
-	defer s.Unlock()
+func (s *OnDisk) isLastChunk(chunk string) bool {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return chunk == s.lastChunk
+}
 
-	if chunk == s.lastChunk {
+// Ack marks the current chunk as done and deletes it's contents.
+func (s *OnDisk) Ack(chunk string, size uint64) error {
+	if s.isLastChunk(chunk) {
 		return fmt.Errorf("could not delete incomplete chunk %q", chunk)
 	}
-
+	fmt.Println("run here")
 	chunkFilename := filepath.Join(s.dirname, chunk)
 	fi, err := os.Stat(chunkFilename)
 	if err != nil {
 		return fmt.Errorf("stat %q: %w", chunk, err)
 	}
-	if fi.Size() > size {
+	if uint64(fi.Size()) > size {
 		return fmt.Errorf("file was not fully processed: the supplied processed size %d is smaller than the chunk file size %d", size, fi.Size())
 	}
 	if err := os.Remove(chunkFilename); err != nil {
 		return fmt.Errorf("removing %q: %v", chunk, err)
 	}
-
-	fp, ok := s.fps[chunk]
-	if ok {
-		fp.Close()
-	}
-	delete(s.fps, chunk)
+	s.forgetFileDescriptor(chunk)
 	return nil
 }
 
